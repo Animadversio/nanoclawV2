@@ -25,19 +25,11 @@ import {
   createCodexConfigOverrides,
   initializeCodexAppServer,
   killCodexAppServer,
-  sendCodexRequest,
   spawnCodexAppServer,
   startCodexTurn,
   startOrResumeCodexThread,
   writeCodexMcpConfigToml,
 } from './codex-app-server.js';
-
-function log(msg: string): void {
-  console.error(`[codex-provider] ${msg}`);
-}
-
-/** Cumulative input tokens before triggering native compaction. */
-const COMPACT_THRESHOLD = 40_000;
 
 /** Hard ceiling for a single turn. Guards against app-server wedging. */
 const TURN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -108,7 +100,6 @@ export class CodexProvider implements AgentProvider {
 
       let threadId: string | undefined = input.continuation;
       let initYielded = false;
-      let cumulativeInputTokens = 0;
 
       try {
         await initializeCodexAppServer(server);
@@ -150,23 +141,7 @@ export class CodexProvider implements AgentProvider {
             () => {
               initYielded = true;
             },
-            (tokens) => {
-              cumulativeInputTokens = tokens;
-            },
           );
-
-          // Trigger native compaction between turns if we've crossed the
-          // threshold. Codex's compaction is deterministic enough to do
-          // inline — if it fails, we log and carry on uncompacted.
-          if (cumulativeInputTokens >= COMPACT_THRESHOLD && threadId) {
-            log(`Compacting thread (${cumulativeInputTokens} tokens)`);
-            const compactResp = await sendCodexRequest(server, 'thread/compact/start', { threadId });
-            if (compactResp.error) {
-              log(`Compaction failed: ${compactResp.error.message} — continuing uncompacted`);
-            } else {
-              log('Native compaction completed');
-            }
-          }
         }
       } finally {
         killCodexAppServer(server);
@@ -204,7 +179,6 @@ async function* runOneTurn(
   cwd: string,
   hasInit: () => boolean,
   markInit: () => void,
-  setInputTokens: (n: number) => void,
 ): AsyncGenerator<ProviderEvent> {
   // Mutable refs via object properties — TS can't track closure assignments
   // for narrowing, but property access keeps the declared type visible.
@@ -248,11 +222,6 @@ async function* runOneTurn(
       case 'item/completed': {
         const item = params.item as { type?: string; text?: string } | undefined;
         if (item?.type === 'agentMessage' && item.text) resultText = item.text;
-        break;
-      }
-      case 'thread/tokenUsage/updated': {
-        const usage = params.tokenUsage as { total?: { inputTokens?: number } } | undefined;
-        if (usage?.total?.inputTokens !== undefined) setInputTokens(usage.total.inputTokens);
         break;
       }
       case 'turn/completed':
