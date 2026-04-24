@@ -14,6 +14,7 @@
  * turns, so no message is dropped).
  */
 import fs from 'fs';
+import path from 'path';
 
 import { registerProvider } from './provider-registry.js';
 import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
@@ -35,25 +36,62 @@ import {
 const TURN_TIMEOUT_MS = 5 * 60 * 1000;
 
 // ── System-prompt assembly ──────────────────────────────────────────────────
-// Codex's app-server doesn't read CLAUDE.md/AGENT.md from cwd the way Claude
-// Code does. We have to load it and pass it in as `baseInstructions`. The
-// addendum from the poll-loop (destinations syntax, etc.) is appended.
+// Codex's app-server doesn't expand Claude Code's `@-import` syntax in
+// CLAUDE.md, and doesn't auto-load CLAUDE.local.md from the working dir the
+// way Claude Code does. Left alone, the agent sees only the raw import
+// directives as literal text and none of the composed content — no shared
+// CLAUDE.md, no module fragments, no per-group memory. We resolve both here
+// so Codex (and any other non-Claude provider) gets the same effective
+// system prompt the Claude provider gets natively.
 
-function loadAgentBaseInstructions(): string | undefined {
-  const candidates = ['/workspace/agent/CLAUDE.md', '/workspace/agent/AGENT.md'];
-  const parts: string[] = [];
-  for (const p of candidates) {
-    if (fs.existsSync(p)) {
-      parts.push(fs.readFileSync(p, 'utf-8'));
-      break;
+/**
+ * Inline `@<path>` import directives (line-anchored) with the contents of
+ * the referenced file, resolved relative to `baseDir`. Recurses so imports
+ * within imported files expand too. Cycles and missing files are silently
+ * dropped (replaced with empty text) rather than left as raw `@path` lines,
+ * which would confuse the model.
+ */
+export function resolveClaudeImports(content: string, baseDir: string, seen: Set<string> = new Set()): string {
+  return content.replace(/^@(\S+)\s*$/gm, (_match, importPath: string) => {
+    try {
+      const resolved = path.resolve(baseDir, importPath);
+      if (seen.has(resolved)) return '';
+      if (!fs.existsSync(resolved)) return '';
+      const nextSeen = new Set(seen);
+      nextSeen.add(resolved);
+      const imported = fs.readFileSync(resolved, 'utf-8');
+      return resolveClaudeImports(imported, path.dirname(resolved), nextSeen);
+    } catch {
+      return '';
     }
+  });
+}
+
+function readAgentAndGlobalClaudeMd(): string | undefined {
+  const groupDir = '/workspace/agent';
+  const groupPath = `${groupDir}/CLAUDE.md`;
+  const localPath = `${groupDir}/CLAUDE.local.md`;
+  const globalDir = '/workspace/global';
+  const globalPath = `${globalDir}/CLAUDE.md`;
+  const parts: string[] = [];
+
+  if (fs.existsSync(groupPath)) {
+    parts.push(resolveClaudeImports(fs.readFileSync(groupPath, 'utf-8'), groupDir));
   }
-  return parts.length > 0 ? parts.join('\n\n') : undefined;
+  if (fs.existsSync(localPath)) {
+    parts.push(resolveClaudeImports(fs.readFileSync(localPath, 'utf-8'), groupDir));
+  }
+  const isMain = process.env.NANOCLAW_IS_MAIN === '1';
+  if (!isMain && fs.existsSync(globalPath)) {
+    parts.push(resolveClaudeImports(fs.readFileSync(globalPath, 'utf-8'), globalDir));
+  }
+
+  return parts.length > 0 ? parts.join('\n\n---\n\n') : undefined;
 }
 
 function composeBaseInstructions(promptAddendum: string | undefined): string | undefined {
-  const agentMd = loadAgentBaseInstructions();
-  const pieces = [agentMd, promptAddendum].filter((s): s is string => Boolean(s));
+  const claudeMd = readAgentAndGlobalClaudeMd();
+  const pieces = [claudeMd, promptAddendum].filter((s): s is string => Boolean(s));
   return pieces.length > 0 ? pieces.join('\n\n---\n\n') : undefined;
 }
 
