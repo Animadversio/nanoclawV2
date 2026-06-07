@@ -40,6 +40,37 @@ function log(msg: string): void {
   console.error(`[codex-provider] ${msg}`);
 }
 
+function parseToolInput(raw: unknown): Record<string, unknown> {
+  if (!raw) return {};
+  if (typeof raw === 'string') {
+    try {
+      const parsed = JSON.parse(raw);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : {};
+    } catch {
+      return { input: raw };
+    }
+  }
+  return typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+}
+
+function extractToolCall(item: unknown): { name: string; input?: Record<string, unknown> } | null {
+  if (!item || typeof item !== 'object') return null;
+  const i = item as Record<string, unknown>;
+  const type = typeof i.type === 'string' ? i.type : '';
+  const maybeTool =
+    type.toLowerCase().includes('tool') ||
+    type.toLowerCase().includes('function') ||
+    typeof i.toolName === 'string' ||
+    typeof i.tool_name === 'string' ||
+    typeof i.name === 'string';
+  if (!maybeTool) return null;
+
+  const rawName = i.toolName ?? i.tool_name ?? i.name ?? i.callName ?? i.command;
+  if (typeof rawName !== 'string' || !rawName) return null;
+  const rawInput = i.input ?? i.arguments ?? i.args ?? i.toolInput ?? i.tool_input;
+  return { name: rawName, input: parseToolInput(rawInput) };
+}
+
 // ── System-prompt assembly ──────────────────────────────────────────────────
 // Codex's app-server doesn't expand Claude Code's `@-import` syntax in
 // CLAUDE.md, and doesn't auto-load CLAUDE.local.md from the working dir the
@@ -307,6 +338,11 @@ async function* runOneTurn(
       case 'item/completed': {
         const item = params.item as { type?: string; text?: string } | undefined;
         if (item?.type === 'agentMessage' && item.text) resultText = item.text;
+        break;
+      }
+      case 'item/started': {
+        const tool = extractToolCall(params.item);
+        if (tool) buffer.push({ type: 'tool_call', ...tool });
         break;
       }
       case 'turn/completed': {

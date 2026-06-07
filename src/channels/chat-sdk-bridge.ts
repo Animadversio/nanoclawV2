@@ -74,6 +74,18 @@ export interface ChatSdkBridgeConfig {
    * and reactions still target the head of the reply.
    */
   maxTextLength?: number;
+  /**
+   * Optional platform application-command handler. Gateway adapters forward
+   * slash-command interactions through the local webhook server; channel
+   * modules can handle them here without creating a normal chat message.
+   */
+  onApplicationCommand?: (ctx: {
+    name: string;
+    options: Record<string, string>;
+    platformId: string;
+    threadId: string | null;
+    userId: string;
+  }) => Promise<{ text: string; ephemeral?: boolean } | null>;
 }
 
 /**
@@ -305,7 +317,12 @@ export function createChatSdkBridge(config: ChatSdkBridgeConfig): ChannelAdapter
         gatewayAbort = new AbortController();
 
         // Start local HTTP server to receive forwarded Gateway events (including interactions)
-        const webhookUrl = await startLocalWebhookServer(gatewayAdapter, setupConfig, config.botToken);
+        const webhookUrl = await startLocalWebhookServer(
+          gatewayAdapter,
+          setupConfig,
+          config.botToken,
+          config.onApplicationCommand,
+        );
 
         // Exponential backoff capped at 1h. Without this, an unrecoverable
         // failure (e.g., TokenInvalid) restarts ~10×/sec and Discord's
@@ -561,6 +578,7 @@ function startLocalWebhookServer(
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
   botToken?: string,
+  onApplicationCommand?: ChatSdkBridgeConfig['onApplicationCommand'],
 ): Promise<string> {
   return new Promise((resolve) => {
     const server = http.createServer((req, res) => {
@@ -568,7 +586,7 @@ function startLocalWebhookServer(
       req.on('data', (chunk: Buffer) => chunks.push(chunk));
       req.on('end', () => {
         const body = Buffer.concat(chunks).toString();
-        handleForwardedEvent(body, adapter, setupConfig, botToken)
+        handleForwardedEvent(body, adapter, setupConfig, botToken, onApplicationCommand)
           .then(() => {
             res.writeHead(200, { 'Content-Type': 'application/json' });
             res.end('{"ok":true}');
@@ -595,6 +613,7 @@ async function handleForwardedEvent(
   adapter: GatewayAdapter,
   setupConfig: ChannelSetup,
   botToken?: string,
+  onApplicationCommand?: ChatSdkBridgeConfig['onApplicationCommand'],
 ): Promise<void> {
   let event: { type: string; data: Record<string, unknown> };
   try {
@@ -603,9 +622,65 @@ async function handleForwardedEvent(
     return;
   }
 
-  // Handle interaction events (button clicks) — not handled by adapter's handleForwardedGatewayEvent
+  // Handle interaction events (button clicks + application commands) - not
+  // handled by adapter's handleForwardedGatewayEvent.
   if (event.type === 'GATEWAY_INTERACTION_CREATE' && event.data) {
     const interaction = event.data;
+    if (interaction.type === 2) {
+      const data = interaction.data as Record<string, unknown> | undefined;
+      const name = data?.name as string | undefined;
+      if (name && onApplicationCommand) {
+        const interactionId = interaction.id as string;
+        const interactionToken = interaction.token as string;
+        const user =
+          ((interaction.member as Record<string, unknown>)?.user as Record<string, string> | undefined) ??
+          (interaction.user as Record<string, string> | undefined);
+        const threadId = (interaction.channel_id as string | undefined) ?? null;
+        const guildId = interaction.guild_id as string | undefined;
+        const platformId =
+          adapter.name === 'discord' && threadId
+            ? `discord:${guildId || '@me'}:${threadId}`
+            : threadId
+              ? adapter.channelIdFromThreadId(threadId)
+              : '';
+        const options: Record<string, string> = {};
+        const rawOptions = (data?.options as Array<Record<string, unknown>> | undefined) ?? [];
+        for (const opt of rawOptions) {
+          if (typeof opt.name === 'string' && opt.value != null) options[opt.name] = String(opt.value);
+        }
+
+        let text = 'Command handled.';
+        let ephemeral = true;
+        try {
+          const response = await onApplicationCommand({
+            name,
+            options,
+            platformId,
+            threadId,
+            userId: user?.id || '',
+          });
+          if (!response) return;
+          text = response.text;
+          ephemeral = response.ephemeral ?? true;
+        } catch (err) {
+          log.error('Application command handler failed', { name, err });
+          text = 'NanoClaw failed to handle that command. Check the host logs.';
+        }
+
+        await fetch(`https://discord.com/api/v10/interactions/${interactionId}/${interactionToken}/callback`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: 4, // CHANNEL_MESSAGE_WITH_SOURCE
+            data: {
+              content: text,
+              flags: ephemeral ? 64 : undefined,
+            },
+          }),
+        });
+        return;
+      }
+    }
     // type 3 = MessageComponent (button/select)
     if (interaction.type === 3) {
       const customId = (interaction.data as Record<string, unknown>)?.custom_id as string;

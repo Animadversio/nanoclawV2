@@ -15,6 +15,12 @@ import {
 } from './formatter.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
+import {
+  formatToolNotification,
+  handleVerboseCommandMessage,
+  readVerboseLevel,
+  verboseInstructions,
+} from './verbose-mode.js';
 
 const POLL_INTERVAL_MS = 1000;
 const ACTIVE_POLL_INTERVAL_MS = 500;
@@ -175,6 +181,23 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
         commandIds.push(msg.id);
         continue;
       }
+      if (msg.kind === 'chat' || msg.kind === 'chat-sdk') {
+        const verbose = handleVerboseCommandMessage(msg);
+        if (verbose.matched) {
+          if (verbose.response) {
+            writeMessageOut({
+              id: generateId(),
+              kind: 'chat',
+              platform_id: routing.platformId,
+              channel_type: routing.channelType,
+              thread_id: routing.threadId,
+              content: JSON.stringify({ text: verbose.response }),
+            });
+          }
+          commandIds.push(msg.id);
+          continue;
+        }
+      }
       normalMessages.push(msg);
     }
 
@@ -218,11 +241,17 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
+    const verboseLevel = readVerboseLevel();
+    const verbosePrompt = verboseInstructions(verboseLevel);
+    const systemInstructions = [config.systemContext?.instructions, verbosePrompt]
+      .filter((s): s is string => Boolean(s))
+      .join('\n\n');
+
     const query = config.provider.query({
       prompt,
       continuation,
       cwd: config.cwd,
-      systemContext: config.systemContext,
+      systemContext: systemInstructions ? { instructions: systemInstructions } : config.systemContext,
     });
 
     // Process the query while concurrently polling for new messages
@@ -362,18 +391,43 @@ async function processQuery(
         const newMessages = pending.filter((m) => m.kind !== 'system');
         if (newMessages.length === 0) return;
 
-        const newIds = newMessages.map((m) => m.id);
+        const verboseCommandIds: string[] = [];
+        const followUpMessages: MessageInRow[] = [];
+        for (const msg of newMessages) {
+          const verbose = handleVerboseCommandMessage(msg);
+          if (verbose.matched) {
+            const msgRouting = extractRouting([msg]);
+            if (verbose.response) {
+              writeMessageOut({
+                id: generateId(),
+                kind: 'chat',
+                platform_id: msgRouting.platformId,
+                channel_type: msgRouting.channelType,
+                thread_id: msgRouting.threadId,
+                content: JSON.stringify({ text: verbose.response }),
+              });
+            }
+            verboseCommandIds.push(msg.id);
+          } else {
+            followUpMessages.push(msg);
+          }
+        }
+
+        if (verboseCommandIds.length > 0) markCompleted(verboseCommandIds);
+        if (followUpMessages.length === 0) return;
+
+        const newIds = followUpMessages.map((m) => m.id);
         markProcessing(newIds);
 
         // Run pre-task scripts on follow-ups too — without this, a task that
         // arrives during an active query (e.g. a */10 monitoring cron) bypasses
         // its script gate and always wakes the agent, defeating the gate.
         // Mirrors the initial-batch hook above.
-        let keep = newMessages;
+        let keep = followUpMessages;
         let skipped: string[] = [];
         // MODULE-HOOK:scheduling-pre-task-followup:start
         const { applyPreTaskScripts } = await import('./scheduling/task-script.js');
-        const preTask = await applyPreTaskScripts(newMessages);
+        const preTask = await applyPreTaskScripts(followUpMessages);
         keep = preTask.keep;
         skipped = preTask.skipped;
         if (skipped.length > 0) {
@@ -478,7 +532,7 @@ async function processQuery(
   return { continuation: queryContinuation };
 }
 
-function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
+function handleEvent(event: ProviderEvent, routing: RoutingContext): void {
   switch (event.type) {
     case 'init':
       log(`Session: ${event.continuation}`);
@@ -494,6 +548,20 @@ function handleEvent(event: ProviderEvent, _routing: RoutingContext): void {
     case 'progress':
       log(`Progress: ${event.message}`);
       break;
+    case 'tool_call': {
+      const notification = formatToolNotification(readVerboseLevel(), { name: event.name, input: event.input });
+      if (notification) {
+        writeMessageOut({
+          id: generateId(),
+          kind: 'chat',
+          platform_id: routing.platformId,
+          channel_type: routing.channelType,
+          thread_id: routing.threadId,
+          content: JSON.stringify({ text: notification }),
+        });
+      }
+      break;
+    }
   }
 }
 
