@@ -7,11 +7,9 @@
  * the standalone codex CLI uses, so the container and host share one
  * provider-integration story.
  *
- * Codex turns don't accept mid-turn input. Follow-up `push()` messages are
- * queued and drained after the current turn completes (same pattern as the
- * opencode provider — see poll-loop for why that's correct: the poll-loop
- * only pushes once it has new pending messages, and we only drain between
- * turns, so no message is dropped).
+ * Follow-up `push()` messages steer the active turn through `turn/steer`.
+ * Messages that arrive before the turn starts, or while Codex is running a
+ * non-steerable special turn, are queued for the next normal turn.
  */
 import fs from 'fs';
 import path from 'path';
@@ -25,15 +23,21 @@ import {
   attachCodexAutoApproval,
   createCodexConfigOverrides,
   initializeCodexAppServer,
+  interruptCodexTurn,
   killCodexAppServer,
   spawnCodexAppServer,
   startCodexTurn,
   startOrResumeCodexThread,
+  steerCodexTurn,
   writeCodexMcpConfigToml,
 } from './codex-app-server.js';
 
 /** Hard ceiling for a single turn. Guards against app-server wedging. */
 const TURN_TIMEOUT_MS = 5 * 60 * 1000;
+
+function log(msg: string): void {
+  console.error(`[codex-provider] ${msg}`);
+}
 
 // ── System-prompt assembly ──────────────────────────────────────────────────
 // Codex's app-server doesn't expand Claude Code's `@-import` syntax in
@@ -103,12 +107,10 @@ export class CodexProvider implements AgentProvider {
 
   private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   private readonly model: string;
-  private readonly baseUrl?: string;
 
   constructor(options: ProviderOptions = {}) {
     this.mcpServers = options.mcpServers ?? {};
     this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-5.4-mini';
-    this.baseUrl = options.env?.OPENAI_BASE_URL as string | undefined;
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -121,6 +123,10 @@ export class CodexProvider implements AgentProvider {
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
+    let server: AppServer | null = null;
+    let activeThreadId: string | null = null;
+    let activeTurnId: string | null = null;
+    let steerChain = Promise.resolve();
     const kick = (): void => {
       waiting?.();
     };
@@ -134,7 +140,7 @@ export class CodexProvider implements AgentProvider {
       // query active per batch of pending messages and ends it on idle, so
       // spawn-per-query matches that cadence naturally.
       writeCodexMcpConfigToml(self.mcpServers);
-      const server = spawnCodexAppServer(createCodexConfigOverrides(self.baseUrl));
+      server = spawnCodexAppServer(createCodexConfigOverrides());
       attachCodexAutoApproval(server);
 
       let threadId: string | undefined = input.continuation;
@@ -153,6 +159,7 @@ export class CodexProvider implements AgentProvider {
         };
 
         threadId = await startOrResumeCodexThread(server, threadId, threadParams);
+        activeThreadId = threadId;
 
         while (!aborted) {
           while (pending.length === 0 && !ended && !aborted) {
@@ -180,17 +187,41 @@ export class CodexProvider implements AgentProvider {
             () => {
               initYielded = true;
             },
+            (turnId) => {
+              activeTurnId = turnId;
+            },
           );
+          activeTurnId = null;
+          await steerChain;
         }
       } finally {
-        killCodexAppServer(server);
+        activeTurnId = null;
+        activeThreadId = null;
+        if (server) killCodexAppServer(server);
+        server = null;
       }
     }
 
     return {
       push: (message: string) => {
-        pending.push(message);
-        kick();
+        const steerServer = server;
+        const threadId = activeThreadId;
+        const turnId = activeTurnId;
+        if (!steerServer || !threadId || !turnId) {
+          pending.push(message);
+          kick();
+          return;
+        }
+
+        steerChain = steerChain.then(async () => {
+          try {
+            await steerCodexTurn(steerServer, threadId, turnId, message);
+          } catch (err) {
+            log(`Steering active turn failed; queueing follow-up: ${err instanceof Error ? err.message : String(err)}`);
+            pending.push(message);
+            kick();
+          }
+        });
       },
       end: () => {
         ended = true;
@@ -198,6 +229,14 @@ export class CodexProvider implements AgentProvider {
       },
       abort: () => {
         aborted = true;
+        const interruptServer = server;
+        const threadId = activeThreadId;
+        const turnId = activeTurnId;
+        if (interruptServer && threadId && turnId) {
+          void interruptCodexTurn(interruptServer, threadId, turnId).catch((err) => {
+            log(`Failed to interrupt active turn: ${err instanceof Error ? err.message : String(err)}`);
+          });
+        }
         kick();
       },
       events: gen(),
@@ -218,6 +257,7 @@ async function* runOneTurn(
   cwd: string,
   hasInit: () => boolean,
   markInit: () => void,
+  setActiveTurnId: (turnId: string) => void,
 ): AsyncGenerator<ProviderEvent> {
   // Mutable refs via object properties — TS can't track closure assignments
   // for narrowing, but property access keeps the declared type visible.
@@ -253,6 +293,11 @@ async function* runOneTurn(
         }
         break;
       }
+      case 'turn/started': {
+        const turn = params.turn as { id?: string } | undefined;
+        if (turn?.id) setActiveTurnId(turn.id);
+        break;
+      }
       case 'item/agentMessage/delta': {
         const delta = params.delta as string;
         if (delta) resultText += delta;
@@ -263,9 +308,14 @@ async function* runOneTurn(
         if (item?.type === 'agentMessage' && item.text) resultText = item.text;
         break;
       }
-      case 'turn/completed':
+      case 'turn/completed': {
+        const turn = params.turn as { status?: string; error?: { message?: string } | null } | undefined;
+        if (turn?.status === 'failed') {
+          turnState.error = new Error(turn.error?.message || 'Turn failed');
+        }
         turnDone = true;
         break;
+      }
       case 'turn/failed': {
         const e = params.error as { message?: string } | undefined;
         turnState.error = new Error(e?.message || 'Turn failed');
@@ -302,7 +352,8 @@ async function* runOneTurn(
       buffer.push({ type: 'init', continuation: threadId });
     }
 
-    await startCodexTurn(server, { threadId, inputText, model, cwd });
+    const turnId = await startCodexTurn(server, { threadId, inputText, model, cwd });
+    setActiveTurnId(turnId);
 
     while (true) {
       while (buffer.length > 0) {

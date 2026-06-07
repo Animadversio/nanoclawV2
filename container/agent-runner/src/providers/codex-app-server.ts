@@ -209,6 +209,15 @@ export function sendCodexResponse(server: AppServer, id: number, result: unknown
   }
 }
 
+export function sendCodexNotification(server: AppServer, method: string, params: Record<string, unknown> = {}): void {
+  const line = JSON.stringify({ method, params }) + '\n';
+  try {
+    server.process.stdin!.write(line);
+  } catch (err) {
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+}
+
 export function killCodexAppServer(server: AppServer): void {
   try {
     server.readline.close();
@@ -278,6 +287,7 @@ export async function initializeCodexAppServer(server: AppServer): Promise<void>
     INIT_TIMEOUT_MS,
   );
   if (resp.error) throw new Error(`Initialize failed: ${resp.error.message}`);
+  sendCodexNotification(server, 'initialized');
   log('Initialize successful');
 }
 
@@ -340,7 +350,7 @@ export interface TurnParams {
   cwd?: string;
 }
 
-export async function startCodexTurn(server: AppServer, params: TurnParams): Promise<void> {
+export async function startCodexTurn(server: AppServer, params: TurnParams): Promise<string> {
   const resp = await sendCodexRequest(server, 'turn/start', {
     threadId: params.threadId,
     input: [{ type: 'text', text: params.inputText }],
@@ -348,6 +358,30 @@ export async function startCodexTurn(server: AppServer, params: TurnParams): Pro
     cwd: params.cwd,
   });
   if (resp.error) throw new Error(`turn/start failed: ${resp.error.message}`);
+
+  const result = resp.result as { turn?: { id?: string } } | undefined;
+  const turnId = result?.turn?.id;
+  if (!turnId) throw new Error('turn/start response missing turn ID');
+  return turnId;
+}
+
+export async function steerCodexTurn(
+  server: AppServer,
+  threadId: string,
+  expectedTurnId: string,
+  inputText: string,
+): Promise<void> {
+  const resp = await sendCodexRequest(server, 'turn/steer', {
+    threadId,
+    expectedTurnId,
+    input: [{ type: 'text', text: inputText }],
+  });
+  if (resp.error) throw new Error(`turn/steer failed: ${resp.error.message}`);
+}
+
+export async function interruptCodexTurn(server: AppServer, threadId: string, turnId: string): Promise<void> {
+  const resp = await sendCodexRequest(server, 'turn/interrupt', { threadId, turnId });
+  if (resp.error) throw new Error(`turn/interrupt failed: ${resp.error.message}`);
 }
 
 // ── MCP config.toml ─────────────────────────────────────────────────────────
@@ -388,8 +422,6 @@ export function writeCodexMcpConfigToml(servers: Record<string, CodexMcpServer>)
   log(`Wrote MCP config.toml (${Object.keys(servers).length} server(s))`);
 }
 
-export function createCodexConfigOverrides(baseUrl?: string | null): string[] {
-  const overrides = ['features.use_linux_sandbox_bwrap=false'];
-  if (baseUrl) overrides.push(`model_provider_base_url="${baseUrl}"`);
-  return overrides;
+export function createCodexConfigOverrides(): string[] {
+  return ['features.use_linux_sandbox_bwrap=false'];
 }
