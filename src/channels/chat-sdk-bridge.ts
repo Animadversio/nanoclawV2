@@ -637,9 +637,11 @@ async function handleForwardedEvent(
           (interaction.user as Record<string, string> | undefined);
         const threadId = (interaction.channel_id as string | undefined) ?? null;
         const guildId = interaction.guild_id as string | undefined;
+        const channel = interaction.channel as Record<string, unknown> | undefined;
+        const parentId = channel?.parent_id as string | undefined;
         const platformId =
           adapter.name === 'discord' && threadId
-            ? `discord:${guildId || '@me'}:${threadId}`
+            ? `discord:${guildId || '@me'}:${parentId || threadId}`
             : threadId
               ? adapter.channelIdFromThreadId(threadId)
               : '';

@@ -2,7 +2,9 @@ import fs from 'fs';
 import path from 'path';
 
 import { getAgentGroup } from './db/agent-groups.js';
+import { getDb } from './db/connection.js';
 import { getMessagingGroupAgents, getMessagingGroupByPlatform } from './db/messaging-groups.js';
+import type { AgentGroup, Session } from './types.js';
 
 export type VerboseLevel = 'all' | 'edit' | 'bash';
 
@@ -13,24 +15,36 @@ export interface VerboseCommandResponse {
   message: string;
 }
 
+function getAgentGroupForPlatform(channelType: string, platformId: string): AgentGroup | undefined {
+  const mg = getMessagingGroupByPlatform(channelType, platformId);
+  if (mg) {
+    const wiring = getMessagingGroupAgents(mg.id)[0];
+    return wiring ? getAgentGroup(wiring.agent_group_id) : undefined;
+  }
+
+  const direct = getDb()
+    .prepare("SELECT * FROM sessions WHERE thread_id = ? AND status = 'active' ORDER BY last_active DESC LIMIT 1")
+    .get(platformId) as Session | undefined;
+  if (direct) return getAgentGroup(direct.agent_group_id);
+
+  if (channelType !== 'discord') return undefined;
+  const threadSnowflake = platformId.split(':').at(-1);
+  if (!threadSnowflake) return undefined;
+  const suffix = `%:${threadSnowflake}`;
+  const byThreadSuffix = getDb()
+    .prepare("SELECT * FROM sessions WHERE thread_id LIKE ? AND status = 'active' ORDER BY last_active DESC LIMIT 1")
+    .get(suffix) as Session | undefined;
+  return byThreadSuffix ? getAgentGroup(byThreadSuffix.agent_group_id) : undefined;
+}
+
 export function setVerboseModeForPlatform(
   channelType: string,
   platformId: string,
   level: VerboseLevel | 'off',
 ): VerboseCommandResponse {
-  const mg = getMessagingGroupByPlatform(channelType, platformId);
-  if (!mg) {
-    return { ok: false, message: 'This Discord channel is not registered with NanoClaw yet.' };
-  }
-
-  const wiring = getMessagingGroupAgents(mg.id)[0];
-  if (!wiring) {
-    return { ok: false, message: 'This Discord channel is not wired to an agent group yet.' };
-  }
-
-  const group = getAgentGroup(wiring.agent_group_id);
+  const group = getAgentGroupForPlatform(channelType, platformId);
   if (!group) {
-    return { ok: false, message: 'The wired agent group no longer exists.' };
+    return { ok: false, message: 'This Discord channel or thread is not registered with NanoClaw yet.' };
   }
 
   const flagPath = path.join(process.cwd(), 'groups', group.folder, '.verbose');
