@@ -490,10 +490,16 @@ async function buildHostRunnerSpec(
   const sessDir = sessionDir(agentGroup.id, session.id);
   const { groupDir, skillsSrc, agentRunnerSrc } = prepareRunnerFilesystem(agentGroup, containerConfig, 'host');
 
-  // Keep OneCLI's stable agent identity for approval/audit routing, but do
-  // not apply Docker proxy env vars in host mode. Host-mode providers use
-  // native credentials and the user's normal macOS command environment.
-  await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  // Keep OneCLI's stable agent identity for approval/audit routing when the
+  // gateway is available, but do not let it block host mode. Host-mode
+  // providers use native credentials and the user's normal macOS command
+  // environment, so an unreachable local OneCLI gateway must not prevent the
+  // runner from starting.
+  try {
+    await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+  } catch (err) {
+    log.warn('OneCLI agent registration skipped in host mode', { agentGroupId: agentGroup.id, err });
+  }
 
   const hostCodexHome = path.join(sessDir, 'codex');
   fs.mkdirSync(hostCodexHome, { recursive: true });

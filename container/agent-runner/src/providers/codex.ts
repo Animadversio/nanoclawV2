@@ -53,10 +53,23 @@ function parseToolInput(raw: unknown): Record<string, unknown> {
   return typeof raw === 'object' && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
 }
 
-function extractToolCall(item: unknown): { name: string; input?: Record<string, unknown> } | null {
+export function extractToolCall(item: unknown): { name: string; input?: Record<string, unknown> } | null {
   if (!item || typeof item !== 'object') return null;
   const i = item as Record<string, unknown>;
   const type = typeof i.type === 'string' ? i.type : '';
+
+  if (type === 'commandExecution') {
+    const command = typeof i.command === 'string' ? i.command : '';
+    if (!command) return null;
+    return {
+      name: 'Bash',
+      input: {
+        command,
+        cwd: typeof i.cwd === 'string' ? i.cwd : undefined,
+      },
+    };
+  }
+
   const maybeTool =
     type.toLowerCase().includes('tool') ||
     type.toLowerCase().includes('function') ||

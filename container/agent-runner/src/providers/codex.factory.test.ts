@@ -5,7 +5,7 @@ import path from 'path';
 import { describe, it, expect } from 'bun:test';
 
 import { createProvider } from './factory.js';
-import { CodexProvider, resolveClaudeImports } from './codex.js';
+import { CodexProvider, extractToolCall, resolveClaudeImports } from './codex.js';
 
 describe('createProvider (codex)', () => {
   it('returns CodexProvider for codex', () => {
@@ -29,6 +29,25 @@ describe('createProvider (codex)', () => {
   it('declares no native slash command support', () => {
     const p = new CodexProvider();
     expect(p.supportsNativeSlashCommands).toBe(false);
+  });
+});
+
+describe('Codex app-server tool extraction', () => {
+  it('maps commandExecution items to Bash notifications', () => {
+    expect(
+      extractToolCall({
+        type: 'commandExecution',
+        command: '/bin/zsh -c pwd',
+        cwd: '/Users/example/project',
+        status: 'inProgress',
+      }),
+    ).toEqual({
+      name: 'Bash',
+      input: {
+        command: '/bin/zsh -c pwd',
+        cwd: '/Users/example/project',
+      },
+    });
   });
 });
 
