@@ -18,7 +18,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { GROUPS_DIR } from './config.js';
-import type { McpServerConfig } from './container-config.js';
+import { mergeMcpServers, type McpServerConfig } from './container-config.js';
 import { getContainerConfig } from './db/container-configs.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
@@ -63,9 +63,10 @@ export function composeGroupClaudeMd(group: AgentGroup, options: ComposeGroupCla
 
   // Desired fragment set.
   const configRow = getContainerConfig(group.id);
-  const mcpServers: Record<string, McpServerConfig> = configRow
+  const groupMcpServers: Record<string, McpServerConfig> = configRow
     ? (JSON.parse(configRow.mcp_servers) as Record<string, McpServerConfig>)
     : {};
+  const mcpServers = mergeMcpServers(groupMcpServers);
   const desired = new Map<string, { type: 'symlink' | 'inline'; content: string }>();
 
   // Skill fragments — every skill that ships an `instructions.md`.

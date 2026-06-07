@@ -16,6 +16,8 @@ import { getContainerConfig } from './db/container-configs.js';
 import { getAgentGroup } from './db/agent-groups.js';
 import type { AgentGroup, ContainerConfigRow } from './types.js';
 
+const GLOBAL_MCP_CONFIG_PATH = '.mcp.json';
+
 export interface McpServerConfig {
   command: string;
   args?: string[];
@@ -46,11 +48,25 @@ export interface ContainerConfig {
   effort?: string;
 }
 
+export function loadGlobalMcpServers(
+  configPath = path.join(process.cwd(), GLOBAL_MCP_CONFIG_PATH),
+): Record<string, McpServerConfig> {
+  if (!fs.existsSync(configPath)) return {};
+  const raw = JSON.parse(fs.readFileSync(configPath, 'utf8')) as { mcpServers?: unknown };
+  if (!raw.mcpServers || typeof raw.mcpServers !== 'object' || Array.isArray(raw.mcpServers)) return {};
+  return raw.mcpServers as Record<string, McpServerConfig>;
+}
+
+export function mergeMcpServers(groupServers: Record<string, McpServerConfig>): Record<string, McpServerConfig> {
+  return { ...loadGlobalMcpServers(), ...groupServers };
+}
+
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
 export function configFromDb(row: ContainerConfigRow, group: AgentGroup): ContainerConfig {
+  const groupMcpServers = JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>;
   return {
     runtime: row.runtime === 'docker' ? 'docker' : 'host',
-    mcpServers: JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>,
+    mcpServers: mergeMcpServers(groupMcpServers),
     packages: {
       apt: JSON.parse(row.packages_apt) as string[],
       npm: JSON.parse(row.packages_npm) as string[],
