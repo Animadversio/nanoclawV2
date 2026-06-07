@@ -15,13 +15,16 @@
  * Usage:
  *   pnpm exec tsx scripts/init-cli-agent.ts \
  *     --display-name "Gavriel" \
- *     [--agent-name "Andy"]
+ *     [--agent-name "Andy"] \
+ *     [--provider codex] \
+ *     [--model gpt-5.4-mini]
  */
 import path from 'path';
 
 import { DATA_DIR } from '../src/config.js';
 import { createAgentGroup, getAgentGroupByFolder } from '../src/db/agent-groups.js';
 import { initDb } from '../src/db/connection.js';
+import { updateContainerConfigScalars } from '../src/db/container-configs.js';
 import {
   createMessagingGroup,
   createMessagingGroupAgent,
@@ -42,12 +45,16 @@ interface Args {
   displayName: string;
   agentName: string;
   folder?: string;
+  provider?: string;
+  model?: string;
 }
 
 function parseArgs(argv: string[]): Args {
   let displayName: string | undefined;
   let agentName: string | undefined;
   let folder: string | undefined;
+  let provider: string | undefined;
+  let model: string | undefined;
   for (let i = 0; i < argv.length; i++) {
     const key = argv[i];
     const val = argv[i + 1];
@@ -59,6 +66,12 @@ function parseArgs(argv: string[]): Args {
       i++;
     } else if (key === '--folder') {
       folder = val;
+      i++;
+    } else if (key === '--provider') {
+      provider = val;
+      i++;
+    } else if (key === '--model') {
+      model = val;
       i++;
     }
   }
@@ -73,6 +86,8 @@ function parseArgs(argv: string[]): Args {
     displayName,
     agentName: agentName?.trim() || displayName,
     folder,
+    provider: provider?.trim() || undefined,
+    model: model?.trim() || undefined,
   };
 }
 
@@ -123,6 +138,12 @@ async function main(): Promise<void> {
       `You are ${args.agentName}, a personal NanoClaw agent for ${args.displayName}. ` +
       'When the user first reaches out, introduce yourself briefly and invite them to chat. Keep replies concise.',
   });
+  if (args.provider || args.model) {
+    updateContainerConfigScalars(ag.id, {
+      provider: args.provider,
+      model: args.model,
+    });
+  }
 
   // 3. CLI messaging group + wiring.
   let cliMg: MessagingGroup | undefined = getMessagingGroupByPlatform(CLI_CHANNEL, CLI_PLATFORM_ID);
@@ -161,11 +182,11 @@ async function main(): Promise<void> {
 
   console.log('');
   console.log('Init complete.');
-  console.log(
-    `  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`,
-  );
+  console.log(`  owner:   ${CLI_SYNTHETIC_USER_ID}${promotedToOwner ? ' (promoted on first owner)' : ''}`);
   console.log(`  agent:   ${ag.name} [${ag.id}] @ groups/${folder}`);
   console.log(`  channel: cli/${CLI_PLATFORM_ID}`);
+  if (args.provider) console.log(`  provider: ${args.provider}`);
+  if (args.model) console.log(`  model:    ${args.model}`);
   console.log('');
   console.log('Run `pnpm run chat hi` to talk to your agent.');
 }

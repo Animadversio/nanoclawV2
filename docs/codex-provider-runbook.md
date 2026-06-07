@@ -48,7 +48,9 @@ For a fresh v2 checkout:
 pnpm exec tsx scripts/init-cli-agent.ts \
   --display-name "$USER" \
   --agent-name "NanoClaw Codex Test" \
-  --folder "codex-test"
+  --folder "codex-test" \
+  --provider codex \
+  --model gpt-5.4-mini
 ```
 
 The command prints the new agent group ID. Store it for the remaining
@@ -69,16 +71,11 @@ pnpm run dev
 The host owns the `ncl` Unix socket, so leave it running for the remaining
 commands.
 
-## 5. Select Codex for the Test Group
+## 5. Verify Codex for the Test Group
 
-From another terminal, update the central container config:
+From another terminal, verify the central container config:
 
 ```bash
-pnpm run ncl -- groups config update \
-  --id "$CODEX_GROUP_ID" \
-  --provider codex \
-  --model gpt-5.4-mini
-
 pnpm run ncl -- groups config get --id "$CODEX_GROUP_ID"
 ```
 
