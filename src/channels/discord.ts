@@ -204,6 +204,7 @@ registerChannelAdapter('discord', {
       botToken: env.DISCORD_BOT_TOKEN,
       extractReplyContext,
       supportsThreads: true,
+      maxTextLength: 1900,
       onApplicationCommand: async ({ name, options, platformId, userId }) => {
         switch (name) {
           case 'verbose': {

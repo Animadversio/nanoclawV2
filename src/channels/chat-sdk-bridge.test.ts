@@ -204,4 +204,25 @@ describe('createChatSdkBridge.deliver — display cards (send_card)', () => {
     const msg = calls[0].message as { markdown?: string };
     expect(msg.markdown).toBe('plain hello');
   });
+
+  it('splits long text payloads when the channel provides a max text length', async () => {
+    const { calls, postMessage } = makePostCapture();
+    const bridge = createChatSdkBridge({
+      adapter: stubAdapter({ postMessage }),
+      supportsThreads: false,
+      maxTextLength: 20,
+    });
+    const text = 'alpha bravo charlie delta echo foxtrot';
+
+    const id = await bridge.deliver('discord:guild:chan', null, {
+      kind: 'chat-sdk',
+      content: { text },
+    });
+
+    expect(id).toBe('msg-stub');
+    expect(calls.length).toBeGreaterThan(1);
+    const chunks = calls.map((call) => (call.message as { markdown?: string }).markdown ?? '');
+    for (const chunk of chunks) expect(chunk.length).toBeLessThanOrEqual(20);
+    expect(chunks.join('').replace(/\s+/g, '')).toBe(text.replace(/\s+/g, ''));
+  });
 });
