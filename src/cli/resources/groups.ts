@@ -49,6 +49,10 @@ function defaultContainerPath(hostPath: string): string {
   return base;
 }
 
+function visibleMountPath(containerPath: string): string {
+  return path.isAbsolute(containerPath) ? containerPath : `/workspace/extra/${containerPath}`;
+}
+
 function normalizeMountPath(input: string): string {
   if (!input.trim()) throw new Error('--host-path is required');
   return path.resolve(input.replace(/^~(?=$|\/)/, process.env.HOME || ''));
@@ -395,8 +399,8 @@ registerResource({
       access: 'approval',
       description:
         'Add a host directory mount to a group. Use --id <group-id> --host-path <path> ' +
-        '[--container-path <relative-name>] [--readonly true|false]. ' +
-        'Mounts appear inside the container at /workspace/extra/<container-path>. ' +
+        '[--container-path <relative-name-or-absolute-mirror-path>] [--readonly true|false]. ' +
+        'Relative container paths appear inside /workspace/extra/. Absolute container paths must mirror the host path. ' +
         'Changes require `ncl groups restart --id <group-id>` unless the path is already covered by a broad existing mount.',
       handler: async (args) => {
         const id = args.id as string;
@@ -432,7 +436,7 @@ registerResource({
         return {
           added: mount,
           replaced: existingIdx >= 0,
-          visible_at: `/workspace/extra/${containerPath}`,
+          visible_at: visibleMountPath(containerPath),
           note:
             'Restart required for a currently running container to see this mount. ' +
             'Use `ncl groups restart --id ' +
@@ -445,7 +449,7 @@ registerResource({
       access: 'approval',
       description:
         'Remove a host directory mount from a group. Use --id <group-id> and either ' +
-        '--container-path <relative-name> or --host-path <path>. Changes require `ncl groups restart --id <group-id>`.',
+        '--container-path <relative-name-or-absolute-path> or --host-path <path>. Changes require `ncl groups restart --id <group-id>`.',
       handler: async (args) => {
         const id = args.id as string;
         if (!id) throw new Error('--id is required');

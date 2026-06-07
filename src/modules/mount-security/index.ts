@@ -189,9 +189,9 @@ function findAllowedRoot(realPath: string, allowedRoots: AllowedRoot[]): Allowed
 }
 
 /**
- * Validate the container path to prevent escaping /workspace/extra/
+ * Validate a relative container path to prevent escaping /workspace/extra/.
  */
-function isValidContainerPath(containerPath: string): boolean {
+function isValidRelativeContainerPath(containerPath: string): boolean {
   // Must not contain .. to prevent path traversal
   if (containerPath.includes('..')) {
     return false;
@@ -213,6 +213,56 @@ function isValidContainerPath(containerPath: string): boolean {
   }
 
   return true;
+}
+
+/**
+ * Validate an absolute mirror container path.
+ *
+ * Absolute additional mounts are intentionally narrow: the container path must
+ * match the validated host path or a descendant of it. That enables ergonomic
+ * host-path parity like /Users/alice -> /Users/alice without allowing an
+ * approved host directory to be mounted over arbitrary container locations.
+ */
+function isValidAbsoluteMirrorContainerPath(containerPath: string, realHostPath: string): boolean {
+  if (!path.isAbsolute(containerPath)) return false;
+  if (containerPath.includes('\0') || containerPath.includes(':')) return false;
+
+  const normalized = path.normalize(containerPath);
+  if (normalized.includes(`..${path.sep}`) || normalized.endsWith(`${path.sep}..`)) return false;
+
+  const relative = path.relative(realHostPath, normalized);
+  return !relative.startsWith('..') && !path.isAbsolute(relative);
+}
+
+function resolveContainerPath(containerPath: string, realHostPath: string): MountValidationResult {
+  if (path.isAbsolute(containerPath)) {
+    if (!isValidAbsoluteMirrorContainerPath(containerPath, realHostPath)) {
+      return {
+        allowed: false,
+        reason:
+          `Invalid absolute container path: "${containerPath}" - ` +
+          `must match the validated host path "${realHostPath}" or one of its descendants`,
+      };
+    }
+    return {
+      allowed: true,
+      reason: 'absolute mirror path allowed',
+      resolvedContainerPath: path.normalize(containerPath),
+    };
+  }
+
+  if (!isValidRelativeContainerPath(containerPath)) {
+    return {
+      allowed: false,
+      reason: `Invalid container path: "${containerPath}" - must be relative, non-empty, and not contain ".."`,
+    };
+  }
+
+  return {
+    allowed: true,
+    reason: 'relative path allowed',
+    resolvedContainerPath: `/workspace/extra/${containerPath}`,
+  };
 }
 
 export interface MountValidationResult {
@@ -238,16 +288,8 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
     };
   }
 
-  // Derive containerPath from hostPath basename if not specified
+  // Derive containerPath from hostPath basename if not specified.
   const containerPath = mount.containerPath || path.basename(mount.hostPath);
-
-  // Validate container path (cheap check)
-  if (!isValidContainerPath(containerPath)) {
-    return {
-      allowed: false,
-      reason: `Invalid container path: "${containerPath}" - must be relative, non-empty, and not contain ".."`,
-    };
-  }
 
   // Expand and resolve the host path
   const expandedPath = expandPath(mount.hostPath);
@@ -259,6 +301,9 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
       reason: `Host path does not exist: "${mount.hostPath}" (expanded: "${expandedPath}")`,
     };
   }
+
+  const containerPathResult = resolveContainerPath(containerPath, realPath);
+  if (!containerPathResult.allowed) return containerPathResult;
 
   // Check against blocked patterns
   const blockedMatch = matchesBlockedPattern(realPath, allowlist.blockedPatterns);
@@ -301,7 +346,7 @@ export function validateMount(mount: AdditionalMount): MountValidationResult {
     allowed: true,
     reason: `Allowed under root "${allowedRoot.path}"${allowedRoot.description ? ` (${allowedRoot.description})` : ''}`,
     realHostPath: realPath,
-    resolvedContainerPath: containerPath,
+    resolvedContainerPath: containerPathResult.resolvedContainerPath,
     effectiveReadonly,
   };
 }
@@ -331,7 +376,7 @@ export function validateAdditionalMounts(
     if (result.allowed) {
       validatedMounts.push({
         hostPath: result.realHostPath!,
-        containerPath: `/workspace/extra/${result.resolvedContainerPath}`,
+        containerPath: result.resolvedContainerPath!,
         readonly: result.effectiveReadonly!,
       });
 
