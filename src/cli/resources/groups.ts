@@ -1,4 +1,6 @@
 import type { McpServerConfig } from '../../container-config.js';
+import fs from 'fs';
+import path from 'path';
 import { buildAgentGroupImage, killContainer, wakeContainer } from '../../container-runner.js';
 import { restartAgentGroupContainers } from '../../container-restart.js';
 import { getDb, hasTable } from '../../db/connection.js';
@@ -30,6 +32,26 @@ function presentConfig(row: ContainerConfigRow): Record<string, unknown> {
     cli_scope: row.cli_scope,
     updated_at: row.updated_at,
   };
+}
+
+function parseBoolean(value: unknown, defaultValue: boolean): boolean {
+  if (value === undefined) return defaultValue;
+  if (typeof value === 'boolean') return value;
+  const normalized = String(value).trim().toLowerCase();
+  if (['1', 'true', 'yes', 'y'].includes(normalized)) return true;
+  if (['0', 'false', 'no', 'n'].includes(normalized)) return false;
+  throw new Error('boolean value must be one of: true, false, 1, 0, yes, no');
+}
+
+function defaultContainerPath(hostPath: string): string {
+  const base = path.basename(hostPath.replace(/\/+$/, ''));
+  if (!base) throw new Error('--container-path is required when host path has no basename');
+  return base;
+}
+
+function normalizeMountPath(input: string): string {
+  if (!input.trim()) throw new Error('--host-path is required');
+  return path.resolve(input.replace(/^~(?=$|\/)/, process.env.HOME || ''));
 }
 
 registerResource({
@@ -366,6 +388,93 @@ registerResource({
         return {
           removed: { apt: apt || null, npm: npm || null },
           note: 'Image rebuild required for package changes to take effect.',
+        };
+      },
+    },
+    'config add-mount': {
+      access: 'approval',
+      description:
+        'Add a host directory mount to a group. Use --id <group-id> --host-path <path> ' +
+        '[--container-path <relative-name>] [--readonly true|false]. ' +
+        'Mounts appear inside the container at /workspace/extra/<container-path>. ' +
+        'Changes require `ncl groups restart --id <group-id>` unless the path is already covered by a broad existing mount.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+
+        const hostPathArg = (args.host_path ?? args['host-path']) as string | undefined;
+        if (!hostPathArg) throw new Error('--host-path is required');
+        const hostPath = normalizeMountPath(hostPathArg);
+        if (!fs.existsSync(hostPath)) throw new Error(`host path does not exist: ${hostPath}`);
+
+        const containerPath =
+          ((args.container_path ?? args['container-path']) as string | undefined)?.trim() ||
+          defaultContainerPath(hostPath);
+        const readonly = parseBoolean(args.readonly, false);
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const mounts = JSON.parse(row.additional_mounts) as Array<{
+          hostPath: string;
+          containerPath: string;
+          readonly?: boolean;
+        }>;
+        const existingIdx = mounts.findIndex((m) => m.containerPath === containerPath);
+        const mount = { hostPath, containerPath, readonly };
+        if (existingIdx >= 0) {
+          mounts[existingIdx] = mount;
+        } else {
+          mounts.push(mount);
+        }
+        updateContainerConfigJson(id, 'additional_mounts', mounts);
+
+        return {
+          added: mount,
+          replaced: existingIdx >= 0,
+          visible_at: `/workspace/extra/${containerPath}`,
+          note:
+            'Restart required for a currently running container to see this mount. ' +
+            'Use `ncl groups restart --id ' +
+            id +
+            '`.',
+        };
+      },
+    },
+    'config remove-mount': {
+      access: 'approval',
+      description:
+        'Remove a host directory mount from a group. Use --id <group-id> and either ' +
+        '--container-path <relative-name> or --host-path <path>. Changes require `ncl groups restart --id <group-id>`.',
+      handler: async (args) => {
+        const id = args.id as string;
+        if (!id) throw new Error('--id is required');
+
+        const containerPath = ((args.container_path ?? args['container-path']) as string | undefined)?.trim();
+        const hostPathArg = (args.host_path ?? args['host-path']) as string | undefined;
+        if (!containerPath && !hostPathArg) throw new Error('provide --container-path or --host-path');
+        const hostPath = hostPathArg ? normalizeMountPath(hostPathArg) : undefined;
+
+        const row = getContainerConfig(id);
+        if (!row) throw new Error(`No container config for group: ${id}`);
+
+        const mounts = JSON.parse(row.additional_mounts) as Array<{
+          hostPath: string;
+          containerPath: string;
+          readonly?: boolean;
+        }>;
+        const filtered = mounts.filter(
+          (m) => !(containerPath ? m.containerPath === containerPath : m.hostPath === hostPath),
+        );
+        if (filtered.length === mounts.length) {
+          throw new Error('mount not found');
+        }
+        updateContainerConfigJson(id, 'additional_mounts', filtered);
+
+        return {
+          removed: mounts.length - filtered.length,
+          remaining: filtered,
+          note: 'Restart required for a currently running container to drop this mount.',
         };
       },
     },

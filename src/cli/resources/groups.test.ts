@@ -47,6 +47,17 @@ function count(sql: string, ...params: unknown[]): number {
   ).c;
 }
 
+function insertContainerConfig(agentGroupId: string, additionalMounts: unknown[] = []): void {
+  getDb()
+    .prepare(
+      `INSERT INTO container_configs
+         (agent_group_id, provider, model, effort, image_tag, assistant_name, max_messages_per_prompt,
+          skills, mcp_servers, packages_apt, packages_npm, additional_mounts, cli_scope, updated_at)
+       VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, '"all"', '{}', '[]', '[]', ?, 'group', ?)`,
+    )
+    .run(agentGroupId, JSON.stringify(additionalMounts), now());
+}
+
 describe('groups CLI delete cascades dependent rows (#2525)', () => {
   beforeEach(() => {
     if (fs.existsSync(TEST_DIR)) fs.rmSync(TEST_DIR, { recursive: true });
@@ -216,5 +227,76 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     expect(resp.ok).toBe(false);
     expect((resp as { ok: false; error: { code: string; message: string } }).error.code).toBe('handler-error');
     expect((resp as { ok: false; error: { code: string; message: string } }).error.message).toMatch(/not found/i);
+  });
+
+  it('adds and replaces a container mount in the group config', async () => {
+    const GID = 'ag-mounts';
+    const mountRoot = `${TEST_DIR}/mount-root`;
+    fs.mkdirSync(mountRoot, { recursive: true });
+    createAgentGroup({ id: GID, name: 'mounts', folder: 'mounts', agent_provider: null, created_at: now() });
+    insertContainerConfig(GID);
+
+    const addResp = await dispatch(
+      {
+        id: 'req-add-mount',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host_path: mountRoot, container_path: 'home', readonly: 'false' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(addResp.ok).toBe(true);
+    const rowAfterAdd = getDb()
+      .prepare('SELECT additional_mounts FROM container_configs WHERE agent_group_id = ?')
+      .get(GID) as { additional_mounts: string };
+    expect(JSON.parse(rowAfterAdd.additional_mounts)).toEqual([
+      { hostPath: mountRoot, containerPath: 'home', readonly: false },
+    ]);
+
+    const replaceResp = await dispatch(
+      {
+        id: 'req-replace-mount',
+        command: 'groups-config-add-mount',
+        args: { id: GID, host_path: mountRoot, container_path: 'home', readonly: 'true' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(replaceResp.ok).toBe(true);
+    const rowAfterReplace = getDb()
+      .prepare('SELECT additional_mounts FROM container_configs WHERE agent_group_id = ?')
+      .get(GID) as { additional_mounts: string };
+    expect(JSON.parse(rowAfterReplace.additional_mounts)).toEqual([
+      { hostPath: mountRoot, containerPath: 'home', readonly: true },
+    ]);
+  });
+
+  it('removes a container mount by container path', async () => {
+    const GID = 'ag-remove-mount';
+    const mountRoot = `${TEST_DIR}/remove-root`;
+    fs.mkdirSync(mountRoot, { recursive: true });
+    createAgentGroup({
+      id: GID,
+      name: 'remove-mount',
+      folder: 'remove-mount',
+      agent_provider: null,
+      created_at: now(),
+    });
+    insertContainerConfig(GID, [{ hostPath: mountRoot, containerPath: 'home', readonly: false }]);
+
+    const resp = await dispatch(
+      {
+        id: 'req-remove-mount',
+        command: 'groups-config-remove-mount',
+        args: { id: GID, container_path: 'home' },
+      },
+      { caller: 'host' },
+    );
+
+    expect(resp.ok).toBe(true);
+    const row = getDb()
+      .prepare('SELECT additional_mounts FROM container_configs WHERE agent_group_id = ?')
+      .get(GID) as { additional_mounts: string };
+    expect(JSON.parse(row.additional_mounts)).toEqual([]);
   });
 });
