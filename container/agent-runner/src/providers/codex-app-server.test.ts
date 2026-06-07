@@ -111,6 +111,7 @@ describe('turn requests', () => {
         threadId: 'thread-1',
         inputText: 'hello',
         model: 'gpt-5.4-mini',
+        effort: 'high',
         cwd: '/workspace/agent',
       }),
     ).resolves.toBe('turn-1');
@@ -121,6 +122,7 @@ describe('turn requests', () => {
         threadId: 'thread-1',
         input: [{ type: 'text', text: 'hello' }],
         model: 'gpt-5.4-mini',
+        effort: 'high',
         cwd: '/workspace/agent',
       },
     });

@@ -152,10 +152,12 @@ export class CodexProvider implements AgentProvider {
 
   private readonly mcpServers: Record<string, { command: string; args: string[]; env: Record<string, string> }>;
   private readonly model: string;
+  private readonly effort: string | undefined;
 
   constructor(options: ProviderOptions = {}) {
     this.mcpServers = options.mcpServers ?? {};
-    this.model = (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-5.4-mini';
+    this.model = options.model ?? (options.env?.CODEX_MODEL as string | undefined) ?? 'gpt-5.4-mini';
+    this.effort = options.effort;
   }
 
   isSessionInvalid(err: unknown): boolean {
@@ -227,6 +229,7 @@ export class CodexProvider implements AgentProvider {
             threadId!,
             turnInput,
             self.model,
+            self.effort,
             input.cwd,
             () => initYielded,
             () => {
@@ -300,6 +303,7 @@ async function* runOneTurn(
   threadId: string,
   input: ProviderInputItem[],
   model: string,
+  effort: string | undefined,
   cwd: string,
   hasInit: () => boolean,
   markInit: () => void,
@@ -404,7 +408,7 @@ async function* runOneTurn(
     }
 
     const inputText = input.find((item) => item.type === 'text')?.text ?? '';
-    const turnId = await startCodexTurn(server, { threadId, inputText, input, model, cwd });
+    const turnId = await startCodexTurn(server, { threadId, inputText, input, model, effort, cwd });
     setActiveTurnId(turnId);
 
     while (true) {

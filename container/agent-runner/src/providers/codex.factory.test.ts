@@ -30,6 +30,15 @@ describe('createProvider (codex)', () => {
     const p = new CodexProvider();
     expect(p.supportsNativeSlashCommands).toBe(false);
   });
+
+  it('keeps configured model and effort for app-server turns', () => {
+    const p = new CodexProvider({ model: 'gpt-test', effort: 'high' }) as unknown as {
+      model: string;
+      effort?: string;
+    };
+    expect(p.model).toBe('gpt-test');
+    expect(p.effort).toBe('high');
+  });
 });
 
 describe('Codex app-server tool extraction', () => {
