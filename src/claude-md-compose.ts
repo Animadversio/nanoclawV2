@@ -153,8 +153,10 @@ export function composeGroupClaudeMd(group: AgentGroup, options: ComposeGroupCla
  *     memory; after the first spawn regenerates `CLAUDE.md`, this branch
  *     is skipped because `CLAUDE.local.md` now exists)
  *
- * Globally:
- *   - delete `groups/global/` (content already in `container/CLAUDE.md`)
+ * `groups/global/` is intentionally left in place. Some migrated installs
+ * still have that directory tracked in git; deleting it on every startup
+ * creates needless worktree churn. The v2 composer ignores it for runtime
+ * prompt composition, so keeping it is harmless.
  */
 export function migrateGroupsToClaudeLocal(): void {
   if (!fs.existsSync(GROUPS_DIR)) return;
@@ -182,12 +184,6 @@ export function migrateGroupsToClaudeLocal(): void {
       fs.renameSync(claudeMd, claudeLocal);
       actions.push(`${entry.name}/CLAUDE.md → CLAUDE.local.md`);
     }
-  }
-
-  const globalDir = path.join(GROUPS_DIR, 'global');
-  if (fs.existsSync(globalDir)) {
-    fs.rmSync(globalDir, { recursive: true, force: true });
-    actions.push('groups/global/ removed');
   }
 
   if (actions.length > 0) {
