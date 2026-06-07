@@ -27,6 +27,7 @@ import { fileURLToPath } from 'url';
 
 import { loadConfig } from './config.js';
 import { buildSystemPromptAddendum } from './destinations.js';
+import { builtinMcpEnv } from './mcp-env.js';
 // Providers barrel — each enabled provider self-registers on import.
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
@@ -77,7 +78,7 @@ async function main(): Promise<void> {
     nanoclaw: {
       command: 'bun',
       args: ['run', mcpServerPath],
-      env: {},
+      env: builtinMcpEnv(),
     },
   };
 
