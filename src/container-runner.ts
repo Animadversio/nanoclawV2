@@ -49,8 +49,16 @@ import type { AgentGroup, Session } from './types.js';
 
 const onecli = new OneCLI({ url: ONECLI_URL, apiKey: ONECLI_API_KEY });
 
-/** Active containers tracked by session ID. */
-const activeContainers = new Map<string, { process: ChildProcess; containerName: string }>();
+type RunnerRuntime = 'host' | 'docker';
+
+interface ActiveRunner {
+  process: ChildProcess;
+  name: string;
+  runtime: RunnerRuntime;
+}
+
+/** Active per-session runners tracked by session ID. */
+const activeContainers = new Map<string, ActiveRunner>();
 
 /**
  * In-flight wake promises, keyed by session id. Deduplicates concurrent
@@ -131,22 +139,35 @@ async function spawnContainer(session: Session): Promise<void> {
   // buildMounts and buildContainerArgs so side effects (mkdir, etc.) fire once.
   const { provider, contribution } = resolveProviderContribution(session, agentGroup, containerConfig);
 
-  const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
-  const containerName = `nanoclaw-v2-${agentGroup.folder}-${Date.now()}`;
+  const runtime: RunnerRuntime = containerConfig.runtime === 'docker' ? 'docker' : 'host';
+  const runnerName = `nanoclaw-v2-${runtime}-${agentGroup.folder}-${Date.now()}`;
   // OneCLI agent identifier is always the agent group id — stable across
   // sessions and reversible via getAgentGroup() for approval routing.
   const agentIdentifier = agentGroup.id;
-  const args = await buildContainerArgs(
-    mounts,
-    containerName,
-    agentGroup,
-    containerConfig,
-    provider,
-    contribution,
-    agentIdentifier,
-  );
+  let child: ChildProcess;
+  if (runtime === 'docker') {
+    const mounts = buildMounts(agentGroup, session, containerConfig, contribution);
+    const args = await buildContainerArgs(
+      mounts,
+      runnerName,
+      agentGroup,
+      containerConfig,
+      provider,
+      contribution,
+      agentIdentifier,
+    );
 
-  log.info('Spawning container', { sessionId: session.id, agentGroup: agentGroup.name, containerName });
+    log.info('Spawning Docker runner', { sessionId: session.id, agentGroup: agentGroup.name, runnerName });
+    child = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+  } else {
+    const hostSpec = await buildHostRunnerSpec(session, agentGroup, containerConfig, contribution, agentIdentifier);
+    log.info('Spawning host runner', { sessionId: session.id, agentGroup: agentGroup.name, runnerName });
+    child = spawn(hostSpec.command, hostSpec.args, {
+      cwd: hostSpec.cwd,
+      env: hostSpec.env,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+  }
 
   // Clear any orphan heartbeat from a previous container instance — the
   // sweep's ceiling check treats a missing file as "fresh spawn, give grace"
@@ -154,42 +175,40 @@ async function spawnContainer(session: Session): Promise<void> {
   // immediate kill before the new container touches the file itself.
   fs.rmSync(heartbeatPath(agentGroup.id, session.id), { force: true });
 
-  const container = spawn(CONTAINER_RUNTIME_BIN, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-
-  activeContainers.set(session.id, { process: container, containerName });
+  activeContainers.set(session.id, { process: child, name: runnerName, runtime });
   markContainerRunning(session.id);
 
   // Log stderr
-  container.stderr?.on('data', (data) => {
+  child.stderr?.on('data', (data) => {
     for (const line of data.toString().trim().split('\n')) {
       if (line) log.debug(line, { container: agentGroup.folder });
     }
   });
 
   // stdout is unused in v2 (all IO is via session DB)
-  container.stdout?.on('data', () => {});
+  child.stdout?.on('data', () => {});
 
   // No host-side idle timeout. Stale/stuck detection is driven by the host
   // sweep reading heartbeat mtime + processing_ack claim age + container_state
   // (see src/host-sweep.ts). This avoids killing long-running legitimate work
   // on a wall-clock timer.
 
-  container.on('close', (code) => {
+  child.on('close', (code) => {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
-    log.info('Container exited', { sessionId: session.id, code, containerName });
+    log.info('Runner exited', { sessionId: session.id, code, runnerName, runtime });
   });
 
-  container.on('error', (err) => {
+  child.on('error', (err) => {
     activeContainers.delete(session.id);
     markContainerStopped(session.id);
     stopTypingRefresh(session.id);
-    log.error('Container spawn error', { sessionId: session.id, err });
+    log.error('Runner spawn error', { sessionId: session.id, err, runnerName, runtime });
   });
 }
 
-/** Kill a container for a session. */
+/** Kill a runner for a session. */
 export function killContainer(sessionId: string, reason: string, onExit?: () => void): void {
   const entry = activeContainers.get(sessionId);
   if (!entry) return;
@@ -198,11 +217,20 @@ export function killContainer(sessionId: string, reason: string, onExit?: () => 
     entry.process.once('close', onExit);
   }
 
-  log.info('Killing container', { sessionId, reason, containerName: entry.containerName });
-  try {
-    stopContainer(entry.containerName);
-  } catch {
-    entry.process.kill('SIGKILL');
+  log.info('Killing runner', { sessionId, reason, runnerName: entry.name, runtime: entry.runtime });
+  if (entry.runtime === 'docker') {
+    try {
+      stopContainer(entry.name);
+    } catch {
+      entry.process.kill('SIGKILL');
+    }
+  } else {
+    entry.process.kill('SIGTERM');
+    setTimeout(() => {
+      if (activeContainers.get(sessionId)?.process === entry.process) {
+        entry.process.kill('SIGKILL');
+      }
+    }, 1500).unref();
   }
 }
 
@@ -239,6 +267,35 @@ function resolveProviderContribution(
   return { provider, contribution };
 }
 
+function prepareRunnerFilesystem(
+  agentGroup: AgentGroup,
+  containerConfig: import('./container-config.js').ContainerConfig,
+  mode: 'host' | 'docker',
+): { sessionSkillsDir: string; groupDir: string; skillsSrc: string; agentRunnerSrc: string } {
+  const projectRoot = process.cwd();
+
+  initGroupFilesystem(agentGroup);
+
+  const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
+  const skillsSrc = path.join(projectRoot, 'container', 'skills');
+  const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
+  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
+
+  syncSkillSymlinks(claudeDir, containerConfig, mode === 'host' ? skillsSrc : '/app/skills');
+
+  if (mode === 'host') {
+    composeGroupClaudeMd(agentGroup, {
+      sharedClaudeMdPath: path.join(projectRoot, 'container', 'CLAUDE.md'),
+      sharedSkillsBase: skillsSrc,
+      sharedMcpToolsBase: path.join(agentRunnerSrc, 'mcp-tools'),
+    });
+  } else {
+    composeGroupClaudeMd(agentGroup);
+  }
+
+  return { sessionSkillsDir: claudeDir, groupDir, skillsSrc, agentRunnerSrc };
+}
+
 function buildMounts(
   agentGroup: AgentGroup,
   session: Session,
@@ -247,22 +304,15 @@ function buildMounts(
 ): VolumeMount[] {
   const projectRoot = process.cwd();
 
-  // Per-group filesystem state lives forever after first creation. Init is
-  // idempotent: it only writes paths that don't already exist, so this call
-  // is a no-op for groups that have spawned before.
-  initGroupFilesystem(agentGroup);
-
-  // Sync skill symlinks based on container.json selection before mounting.
-  const claudeDir = path.join(DATA_DIR, 'v2-sessions', agentGroup.id, '.claude-shared');
-  syncSkillSymlinks(claudeDir, containerConfig);
-
-  // Compose CLAUDE.md fresh every spawn from the shared base, enabled skill
-  // fragments, and MCP server instructions. See `claude-md-compose.ts`.
-  composeGroupClaudeMd(agentGroup);
+  const {
+    sessionSkillsDir: claudeDir,
+    groupDir,
+    skillsSrc,
+    agentRunnerSrc,
+  } = prepareRunnerFilesystem(agentGroup, containerConfig, 'docker');
 
   const mounts: VolumeMount[] = [];
   const sessDir = sessionDir(agentGroup.id, session.id);
-  const groupDir = path.resolve(GROUPS_DIR, agentGroup.folder);
 
   // Session folder at /workspace (contains inbound.db, outbound.db, outbox/, .claude/)
   mounts.push({ hostPath: sessDir, containerPath: '/workspace', readonly: false });
@@ -311,11 +361,9 @@ function buildMounts(
   mounts.push({ hostPath: claudeDir, containerPath: '/home/node/.claude', readonly: false });
 
   // Shared agent-runner source — read-only, same code for all groups.
-  const agentRunnerSrc = path.join(projectRoot, 'container', 'agent-runner', 'src');
   mounts.push({ hostPath: agentRunnerSrc, containerPath: '/app/src', readonly: true });
 
   // Shared skills — read-only, symlinks in .claude-shared/skills/ point here.
-  const skillsSrc = path.join(projectRoot, 'container', 'skills');
   if (fs.existsSync(skillsSrc)) {
     mounts.push({ hostPath: skillsSrc, containerPath: '/app/skills', readonly: true });
   }
@@ -339,7 +387,11 @@ function buildMounts(
  * selection. Each symlink points to a container path (/app/skills/<name>)
  * so it's dangling on the host but valid inside the container.
  */
-function syncSkillSymlinks(claudeDir: string, containerConfig: import('./container-config.js').ContainerConfig): void {
+function syncSkillSymlinks(
+  claudeDir: string,
+  containerConfig: import('./container-config.js').ContainerConfig,
+  skillTargetBase: string,
+): void {
   const skillsDir = path.join(claudeDir, 'skills');
   if (!fs.existsSync(skillsDir)) {
     fs.mkdirSync(skillsDir, { recursive: true });
@@ -391,9 +443,84 @@ function syncSkillSymlinks(claudeDir: string, containerConfig: import('./contain
       /* missing */
     }
     if (!exists) {
-      fs.symlinkSync(`/app/skills/${skill}`, linkPath);
+      fs.symlinkSync(path.join(skillTargetBase, skill), linkPath);
     }
   }
+}
+
+function resolveExecutable(command: string): string {
+  try {
+    return execSync(`command -v ${command}`, {
+      shell: process.env.SHELL || '/bin/zsh',
+      encoding: 'utf-8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+    }).trim();
+  } catch {
+    throw new Error(
+      `Host runtime requires "${command}" on PATH. Install it or set PATH before starting NanoClaw. ` +
+        `Docker remains available by setting group config runtime=docker.`,
+    );
+  }
+}
+
+function hostAdditionalDirectories(containerConfig: import('./container-config.js').ContainerConfig): string[] {
+  const dirs: string[] = [];
+  for (const mount of containerConfig.additionalMounts || []) {
+    try {
+      const real = fs.realpathSync(mount.hostPath);
+      if (fs.statSync(real).isDirectory() && !dirs.includes(real)) {
+        dirs.push(real);
+      }
+    } catch {
+      // Ignore missing host paths here; Docker mode's mount validator logs
+      // stricter diagnostics. Host mode treats these as optional Codex roots.
+    }
+  }
+  return dirs;
+}
+
+async function buildHostRunnerSpec(
+  session: Session,
+  agentGroup: AgentGroup,
+  containerConfig: import('./container-config.js').ContainerConfig,
+  providerContribution: ProviderContainerContribution,
+  agentIdentifier: string,
+): Promise<{ command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv }> {
+  const bun = resolveExecutable('bun');
+  const sessDir = sessionDir(agentGroup.id, session.id);
+  const { groupDir, skillsSrc, agentRunnerSrc } = prepareRunnerFilesystem(agentGroup, containerConfig, 'host');
+
+  // Keep OneCLI's stable agent identity for approval/audit routing, but do
+  // not apply Docker proxy env vars in host mode. Host-mode providers use
+  // native credentials and the user's normal macOS command environment.
+  await onecli.ensureAgent({ name: agentGroup.name, identifier: agentIdentifier });
+
+  const hostCodexHome = path.join(sessDir, 'codex');
+  fs.mkdirSync(hostCodexHome, { recursive: true });
+
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    ...providerContribution.env,
+    TZ: TIMEZONE,
+    CODEX_HOME: hostCodexHome,
+    NANOCLAW_SESSION_DIR: sessDir,
+    NANOCLAW_AGENT_DIR: groupDir,
+    NANOCLAW_GLOBAL_DIR: path.join(GROUPS_DIR, 'global'),
+    NANOCLAW_SKILLS_DIR: skillsSrc,
+    NANOCLAW_CONFIG_PATH: path.join(groupDir, 'container.json'),
+    NANOCLAW_INBOUND_DB: path.join(sessDir, 'inbound.db'),
+    NANOCLAW_OUTBOUND_DB: path.join(sessDir, 'outbound.db'),
+    NANOCLAW_HEARTBEAT_PATH: heartbeatPath(agentGroup.id, session.id),
+    NANOCLAW_OUTBOX_DIR: path.join(sessDir, 'outbox'),
+    NANOCLAW_ADDITIONAL_DIRECTORIES: JSON.stringify(hostAdditionalDirectories(containerConfig)),
+  };
+
+  return {
+    command: bun,
+    args: ['run', path.join(agentRunnerSrc, 'index.ts')],
+    cwd: groupDir,
+    env,
+  };
 }
 
 async function buildContainerArgs(

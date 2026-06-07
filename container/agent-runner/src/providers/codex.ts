@@ -31,6 +31,7 @@ import {
   steerCodexTurn,
   writeCodexMcpConfigToml,
 } from './codex-app-server.js';
+import { AGENT_DIR } from '../paths.js';
 
 /** Hard ceiling for a single turn. Guards against app-server wedging. */
 const TURN_TIMEOUT_MS = 5 * 60 * 1000;
@@ -79,7 +80,7 @@ function readAgentAndGlobalClaudeMd(): string | undefined {
   // global content for any non-main group, wasting context tokens and
   // risking contradictory instructions. Groups that don't import global
   // intentionally don't get it — same as Claude-backed agents.
-  const groupDir = '/workspace/agent';
+  const groupDir = AGENT_DIR;
   const groupPath = `${groupDir}/CLAUDE.md`;
   const localPath = `${groupDir}/CLAUDE.local.md`;
   const parts: string[] = [];

@@ -31,6 +31,7 @@ export interface AdditionalMountConfig {
 
 /** Shape of the materialized `container.json` file read by the container runner. */
 export interface ContainerConfig {
+  runtime: 'host' | 'docker';
   mcpServers: Record<string, McpServerConfig>;
   packages: { apt: string[]; npm: string[] };
   imageTag?: string;
@@ -48,6 +49,7 @@ export interface ContainerConfig {
 /** Build a `ContainerConfig` from a DB row + agent group identity. */
 export function configFromDb(row: ContainerConfigRow, group: AgentGroup): ContainerConfig {
   return {
+    runtime: row.runtime === 'docker' ? 'docker' : 'host',
     mcpServers: JSON.parse(row.mcp_servers) as Record<string, McpServerConfig>,
     packages: {
       apt: JSON.parse(row.packages_apt) as string[],

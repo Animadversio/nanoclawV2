@@ -82,9 +82,14 @@ async function main(): Promise<void> {
   // 1c. One-time filesystem cutover — idempotent, no-op after first run.
   migrateGroupsToClaudeLocal();
 
-  // 2. Container runtime
-  ensureContainerRuntimeRunning();
-  cleanupOrphans();
+  // 2. Optional Docker runtime cleanup. Host mode is the default; Docker is
+  // only required for groups that explicitly set runtime=docker.
+  try {
+    ensureContainerRuntimeRunning();
+    cleanupOrphans();
+  } catch {
+    log.info('Docker runtime unavailable; continuing with host-mode runners');
+  }
 
   // 3. Channel adapters
   await initChannelAdapters((adapter: ChannelAdapter): ChannelSetup => {

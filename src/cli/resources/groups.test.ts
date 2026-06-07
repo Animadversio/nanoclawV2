@@ -52,8 +52,8 @@ function insertContainerConfig(agentGroupId: string, additionalMounts: unknown[]
     .prepare(
       `INSERT INTO container_configs
          (agent_group_id, provider, model, effort, image_tag, assistant_name, max_messages_per_prompt,
-          skills, mcp_servers, packages_apt, packages_npm, additional_mounts, cli_scope, updated_at)
-       VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, '"all"', '{}', '[]', '[]', ?, 'group', ?)`,
+          skills, mcp_servers, packages_apt, packages_npm, additional_mounts, cli_scope, runtime, updated_at)
+       VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, '"all"', '{}', '[]', '[]', ?, 'group', 'host', ?)`,
     )
     .run(agentGroupId, JSON.stringify(additionalMounts), now());
 }
@@ -147,8 +147,8 @@ describe('groups CLI delete cascades dependent rows (#2525)', () => {
     db.prepare(
       `INSERT INTO container_configs
          (agent_group_id, provider, model, effort, image_tag, assistant_name, max_messages_per_prompt,
-          skills, mcp_servers, packages_apt, packages_npm, additional_mounts, cli_scope, updated_at)
-       VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, '"all"', '{}', '[]', '[]', '[]', 'group', ?)`,
+          skills, mcp_servers, packages_apt, packages_npm, additional_mounts, cli_scope, runtime, updated_at)
+       VALUES (?, NULL, NULL, NULL, NULL, NULL, NULL, '"all"', '{}', '[]', '[]', '[]', 'group', 'host', ?)`,
     ).run(GID, now());
 
     const resp = await dispatch({ id: 'req-del', command: 'groups-delete', args: { id: GID } }, { caller: 'host' });

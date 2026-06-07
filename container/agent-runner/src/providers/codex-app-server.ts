@@ -396,7 +396,7 @@ export interface CodexMcpServer {
 }
 
 export function writeCodexMcpConfigToml(servers: Record<string, CodexMcpServer>): void {
-  const codexConfigDir = path.join(process.env.HOME || '/home/node', '.codex');
+  const codexConfigDir = process.env.CODEX_HOME || path.join(process.env.HOME || '/home/node', '.codex');
   fs.mkdirSync(codexConfigDir, { recursive: true });
   const configTomlPath = path.join(codexConfigDir, 'config.toml');
 

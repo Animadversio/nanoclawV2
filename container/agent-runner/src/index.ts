@@ -1,13 +1,10 @@
 /**
  * NanoClaw Agent Runner v2
  *
- * Runs inside a container. All IO goes through the session DB.
+ * Runs as the per-session agent process. All IO goes through the session DB.
  * No stdin, no stdout markers, no IPC files.
  *
- * Config is read from /workspace/agent/container.json (mounted RO).
- * Only TZ and OneCLI networking vars come from env.
- *
- * Mount structure:
+ * In Docker mode the default path layout is:
  *   /workspace/
  *     inbound.db        ← host-owned session DB (container reads only)
  *     outbound.db       ← container-owned session DB
@@ -19,6 +16,9 @@
  *   /app/src/           ← shared agent-runner source (RO)
  *   /app/skills/        ← shared skills (RO)
  *   /home/node/.claude/ ← Claude SDK state + skill symlinks (RW)
+ *
+ * In host mode the host sets NANOCLAW_* path env vars so these same logical
+ * locations point at real macOS repo/session directories.
  */
 
 import fs from 'fs';
@@ -31,13 +31,12 @@ import { buildSystemPromptAddendum } from './destinations.js';
 // Provider skills append imports to providers/index.ts.
 import './providers/index.js';
 import { createProvider, type ProviderName } from './providers/factory.js';
+import { additionalDirectoriesFromEnv, AGENT_DIR } from './paths.js';
 import { runPollLoop } from './poll-loop.js';
 
 function log(msg: string): void {
   console.error(`[agent-runner] ${msg}`);
 }
-
-const CWD = '/workspace/agent';
 
 async function main(): Promise<void> {
   const config = loadConfig();
@@ -53,19 +52,20 @@ async function main(): Promise<void> {
   // memory lives in /workspace/agent/CLAUDE.local.md (auto-loaded).
   const instructions = buildSystemPromptAddendum(config.assistantName || undefined);
 
-  // Discover additional directories mounted at /workspace/extra/*
-  const additionalDirectories: string[] = [];
+  // Discover additional directories mounted at /workspace/extra/* in Docker,
+  // plus explicit host-mode directories supplied by the host runner.
+  const additionalDirectories: string[] = additionalDirectoriesFromEnv();
   const extraBase = '/workspace/extra';
   if (fs.existsSync(extraBase)) {
     for (const entry of fs.readdirSync(extraBase)) {
       const fullPath = path.join(extraBase, entry);
       if (fs.statSync(fullPath).isDirectory()) {
-        additionalDirectories.push(fullPath);
+        if (!additionalDirectories.includes(fullPath)) additionalDirectories.push(fullPath);
       }
     }
-    if (additionalDirectories.length > 0) {
-      log(`Additional directories: ${additionalDirectories.join(', ')}`);
-    }
+  }
+  if (additionalDirectories.length > 0) {
+    log(`Additional directories: ${additionalDirectories.join(', ')}`);
   }
 
   // MCP server path — bun runs TS directly; no tsc build step in-image.
@@ -98,7 +98,7 @@ async function main(): Promise<void> {
   await runPollLoop({
     provider,
     providerName,
-    cwd: CWD,
+    cwd: AGENT_DIR,
     systemContext: { instructions },
   });
 }

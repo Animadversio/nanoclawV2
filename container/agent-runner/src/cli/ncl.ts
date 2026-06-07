@@ -29,8 +29,9 @@ type ResponseFrame =
 // Paths
 // ---------------------------------------------------------------------------
 
-const INBOUND_DB = '/workspace/inbound.db';
-const OUTBOUND_DB = '/workspace/outbound.db';
+const SESSION_DIR = process.env.NANOCLAW_SESSION_DIR || '/workspace';
+const INBOUND_DB = process.env.NANOCLAW_INBOUND_DB || `${SESSION_DIR}/inbound.db`;
+const OUTBOUND_DB = process.env.NANOCLAW_OUTBOUND_DB || `${SESSION_DIR}/outbound.db`;
 
 // ---------------------------------------------------------------------------
 // DB transport
@@ -174,7 +175,9 @@ function parseArgv(argv: string[]): {
 
 function printUsage(): void {
   process.stdout.write(
-    ['Usage: ncl <command> [--key value ...] [--json]', '', 'Run `ncl help` to list available commands.', ''].join('\n'),
+    ['Usage: ncl <command> [--key value ...] [--json]', '', 'Run `ncl help` to list available commands.', ''].join(
+      '\n',
+    ),
   );
 }
 
@@ -210,9 +213,7 @@ function formatHuman(resp: ResponseFrame): string {
   const header = keys.map((k, i) => k.padEnd(widths[i])).join('  ');
   const sep = widths.map((w) => '-'.repeat(w)).join('  ');
   const rows = data.map((r) =>
-    keys
-      .map((k, i) => String((r as Record<string, unknown>)[k] ?? '').padEnd(widths[i]))
-      .join('  '),
+    keys.map((k, i) => String((r as Record<string, unknown>)[k] ?? '').padEnd(widths[i])).join('  '),
   );
 
   return [header, sep, ...rows, ''].join('\n');

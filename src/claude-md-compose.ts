@@ -23,8 +23,6 @@ import { getContainerConfig } from './db/container-configs.js';
 import { log } from './log.js';
 import type { AgentGroup } from './types.js';
 
-// Symlink targets are container paths — dangling on host (hence the readlink
-// dance instead of existsSync), valid inside the container via RO mounts.
 const SHARED_CLAUDE_MD_CONTAINER_PATH = '/app/CLAUDE.md';
 const SHARED_SKILLS_CONTAINER_BASE = '/app/skills';
 const SHARED_MCP_TOOLS_CONTAINER_BASE = '/app/src/mcp-tools';
@@ -35,19 +33,28 @@ const MCP_TOOLS_HOST_SUBPATH = path.join('container', 'agent-runner', 'src', 'mc
 
 const COMPOSED_HEADER = '<!-- Composed at spawn — do not edit. Edit CLAUDE.local.md for per-group content. -->';
 
+export interface ComposeGroupClaudeMdOptions {
+  sharedClaudeMdPath?: string;
+  sharedSkillsBase?: string;
+  sharedMcpToolsBase?: string;
+}
+
 /**
  * Regenerate `groups/<folder>/CLAUDE.md` from the shared base, enabled skill
  * fragments, and MCP server fragments declared in `container.json`. Creates
  * an empty `CLAUDE.local.md` if missing.
  */
-export function composeGroupClaudeMd(group: AgentGroup): void {
+export function composeGroupClaudeMd(group: AgentGroup, options: ComposeGroupClaudeMdOptions = {}): void {
+  const sharedClaudeMdPath = options.sharedClaudeMdPath || SHARED_CLAUDE_MD_CONTAINER_PATH;
+  const sharedSkillsBase = options.sharedSkillsBase || SHARED_SKILLS_CONTAINER_BASE;
+  const sharedMcpToolsBase = options.sharedMcpToolsBase || SHARED_MCP_TOOLS_CONTAINER_BASE;
   const groupDir = path.resolve(GROUPS_DIR, group.folder);
   if (!fs.existsSync(groupDir)) {
     fs.mkdirSync(groupDir, { recursive: true });
   }
 
   const sharedLink = path.join(groupDir, '.claude-shared.md');
-  syncSymlink(sharedLink, SHARED_CLAUDE_MD_CONTAINER_PATH);
+  syncSymlink(sharedLink, sharedClaudeMdPath);
 
   const fragmentsDir = path.join(groupDir, '.claude-fragments');
   if (!fs.existsSync(fragmentsDir)) {
@@ -70,7 +77,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
       if (fs.existsSync(hostFragment)) {
         desired.set(`skill-${skillName}.md`, {
           type: 'symlink',
-          content: `${SHARED_SKILLS_CONTAINER_BASE}/${skillName}/instructions.md`,
+          content: path.join(sharedSkillsBase, skillName, 'instructions.md'),
         });
       }
     }
@@ -90,7 +97,7 @@ export function composeGroupClaudeMd(group: AgentGroup): void {
       if (moduleName === 'cli' && cliDisabled) continue;
       desired.set(`module-${moduleName}.md`, {
         type: 'symlink',
-        content: `${SHARED_MCP_TOOLS_CONTAINER_BASE}/${entry}`,
+        content: path.join(sharedMcpToolsBase, entry),
       });
     }
   }
