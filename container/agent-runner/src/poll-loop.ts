@@ -5,14 +5,13 @@ import { getInboundDb, touchHeartbeat, clearStaleProcessingAcks } from './db/con
 import { clearContinuation, migrateLegacyContinuation, setContinuation } from './db/session-state.js';
 import { clearCurrentInReplyTo, setCurrentInReplyTo } from './current-batch.js';
 import {
-  formatMessages,
   extractRouting,
-  categorizeMessage,
   isClearCommand,
   isRunnerCommand,
   stripInternalTags,
   type RoutingContext,
 } from './formatter.js';
+import { buildProviderInput } from './provider-input.js';
 import { isUploadTraceCommand, uploadTrace } from './upload-trace.js';
 import type { AgentProvider, AgentQuery, ProviderEvent } from './providers/types.js';
 import {
@@ -236,8 +235,10 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     }
 
     // Format messages: passthrough commands get raw text (only if the
-    // provider natively handles slash commands), others get XML.
-    const prompt = formatMessagesWithCommands(keep, config.provider.supportsNativeSlashCommands);
+    // provider natively handles slash commands), others get XML. Image
+    // attachments are also projected into structured provider input for
+    // multimodal providers such as Codex.
+    const providerInput = buildProviderInput(keep, config.provider.supportsNativeSlashCommands);
 
     log(`Processing ${keep.length} message(s), kinds: ${[...new Set(keep.map((m) => m.kind))].join(',')}`);
 
@@ -248,7 +249,8 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
       .join('\n\n');
 
     const query = config.provider.query({
-      prompt,
+      prompt: providerInput.prompt,
+      input: providerInput.input,
       continuation,
       cwd: config.cwd,
       systemContext: systemInstructions ? { instructions: systemInstructions } : config.systemContext,
@@ -297,40 +299,6 @@ export async function runPollLoop(config: PollLoopConfig): Promise<void> {
     markCompleted(processingIds);
     log(`Completed ${ids.length} message(s)`);
   }
-}
-
-/**
- * Format messages, handling passthrough commands differently.
- * When the provider handles slash commands natively (Claude Code),
- * passthrough commands are sent raw (no XML wrapping) so the SDK can
- * dispatch them. Otherwise they fall through to standard XML formatting.
- */
-function formatMessagesWithCommands(messages: MessageInRow[], nativeSlashCommands: boolean): string {
-  const parts: string[] = [];
-  const normalBatch: MessageInRow[] = [];
-
-  for (const msg of messages) {
-    if (nativeSlashCommands && (msg.kind === 'chat' || msg.kind === 'chat-sdk')) {
-      const cmdInfo = categorizeMessage(msg);
-      if (cmdInfo.category === 'passthrough' || cmdInfo.category === 'admin') {
-        // Flush normal batch first
-        if (normalBatch.length > 0) {
-          parts.push(formatMessages(normalBatch));
-          normalBatch.length = 0;
-        }
-        // Pass raw command text (no XML wrapping) — SDK handles it natively
-        parts.push(cmdInfo.text);
-        continue;
-      }
-    }
-    normalBatch.push(msg);
-  }
-
-  if (normalBatch.length > 0) {
-    parts.push(formatMessages(normalBatch));
-  }
-
-  return parts.join('\n\n');
 }
 
 interface QueryResult {
@@ -443,10 +411,10 @@ async function processQuery(
         if (done) return;
 
         const keptIds = keep.map((m) => m.id);
-        const prompt = formatMessages(keep);
+        const providerInput = buildProviderInput(keep, false);
         log(`Pushing ${keep.length} follow-up message(s) into active query`);
         unwrappedNudged = false;
-        query.push(prompt);
+        query.push(providerInput.input);
         markCompleted(keptIds);
       } catch (err) {
         // Without this catch the rejection escapes the void IIFE and Node

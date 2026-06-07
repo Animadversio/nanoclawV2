@@ -346,14 +346,20 @@ export async function startOrResumeCodexThread(
 export interface TurnParams {
   threadId: string;
   inputText: string;
+  input?: UserInputItem[];
   model?: string;
   cwd?: string;
 }
 
+export type UserInputItem =
+  | { type: 'text'; text: string }
+  | { type: 'image'; url: string; detail?: 'auto' | 'low' | 'high' }
+  | { type: 'localImage'; path: string; detail?: 'auto' | 'low' | 'high' };
+
 export async function startCodexTurn(server: AppServer, params: TurnParams): Promise<string> {
   const resp = await sendCodexRequest(server, 'turn/start', {
     threadId: params.threadId,
-    input: [{ type: 'text', text: params.inputText }],
+    input: params.input ?? [{ type: 'text', text: params.inputText }],
     model: params.model,
     cwd: params.cwd,
   });
@@ -369,12 +375,12 @@ export async function steerCodexTurn(
   server: AppServer,
   threadId: string,
   expectedTurnId: string,
-  inputText: string,
+  input: string | UserInputItem[],
 ): Promise<void> {
   const resp = await sendCodexRequest(server, 'turn/steer', {
     threadId,
     expectedTurnId,
-    input: [{ type: 'text', text: inputText }],
+    input: typeof input === 'string' ? [{ type: 'text', text: input }] : input,
   });
   if (resp.error) throw new Error(`turn/steer failed: ${resp.error.message}`);
 }

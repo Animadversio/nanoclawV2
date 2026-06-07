@@ -126,6 +126,32 @@ describe('turn requests', () => {
     });
   });
 
+  it('passes local image parts to turn/start', async () => {
+    const requests: Array<{ id?: number; method: string; params: Record<string, unknown> }> = [];
+    const server = fakeServer({ turn: { id: 'turn-1' } }, requests);
+
+    await startCodexTurn(server, {
+      threadId: 'thread-1',
+      inputText: 'look at this',
+      input: [
+        { type: 'text', text: 'look at this' },
+        { type: 'localImage', path: '/tmp/image.png' },
+      ],
+      model: 'gpt-5.4-mini',
+      cwd: '/workspace/agent',
+    });
+
+    expect(requests[0]).toMatchObject({
+      method: 'turn/start',
+      params: {
+        input: [
+          { type: 'text', text: 'look at this' },
+          { type: 'localImage', path: '/tmp/image.png' },
+        ],
+      },
+    });
+  });
+
   it('steers the expected active turn', async () => {
     const requests: Array<{ id?: number; method: string; params: Record<string, unknown> }> = [];
     const server = fakeServer({ turnId: 'turn-1' }, requests);

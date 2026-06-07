@@ -57,6 +57,12 @@ export interface QueryInput {
   prompt: string;
 
   /**
+   * Optional structured input items for providers that support multimodal
+   * turns. The first item should normally be the formatted text prompt.
+   */
+  input?: ProviderInputItem[];
+
+  /**
    * Opaque continuation token from a previous query. The provider decides
    * what this means (session ID, thread ID, nothing at all).
    */
@@ -80,9 +86,14 @@ export interface McpServerConfig {
   env: Record<string, string>;
 }
 
+export type ProviderInputItem =
+  | { type: 'text'; text: string }
+  | { type: 'image'; url: string; detail?: 'auto' | 'low' | 'high' }
+  | { type: 'localImage'; path: string; detail?: 'auto' | 'low' | 'high' };
+
 export interface AgentQuery {
   /** Push a follow-up message into the active query. */
-  push(message: string): void;
+  push(message: string | ProviderInputItem[]): void;
 
   /** Signal that no more input will be sent. */
   end(): void;

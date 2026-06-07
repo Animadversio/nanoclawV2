@@ -15,7 +15,7 @@ import fs from 'fs';
 import path from 'path';
 
 import { registerProvider } from './provider-registry.js';
-import type { AgentProvider, AgentQuery, ProviderEvent, ProviderOptions, QueryInput } from './types.js';
+import type { AgentProvider, AgentQuery, ProviderEvent, ProviderInputItem, ProviderOptions, QueryInput } from './types.js';
 import {
   type AppServer,
   type JsonRpcNotification,
@@ -164,7 +164,7 @@ export class CodexProvider implements AgentProvider {
   }
 
   query(input: QueryInput): AgentQuery {
-    const pending: string[] = [];
+    const pending: ProviderInputItem[][] = [];
     let waiting: (() => void) | null = null;
     let ended = false;
     let aborted = false;
@@ -176,7 +176,7 @@ export class CodexProvider implements AgentProvider {
       waiting?.();
     };
 
-    pending.push(input.prompt);
+    pending.push(input.input ?? [{ type: 'text', text: input.prompt }]);
 
     const self = this;
 
@@ -216,7 +216,7 @@ export class CodexProvider implements AgentProvider {
           if (aborted) return;
           if (pending.length === 0 && ended) return;
 
-          const text = pending.shift()!;
+          const turnInput = pending.shift()!;
 
           // One turn = one channel of streaming events. Each notification
           // from the app-server yields an `activity` first (so the
@@ -225,7 +225,7 @@ export class CodexProvider implements AgentProvider {
           yield* runOneTurn(
             server,
             threadId!,
-            text,
+            turnInput,
             self.model,
             input.cwd,
             () => initYielded,
@@ -248,22 +248,23 @@ export class CodexProvider implements AgentProvider {
     }
 
     return {
-      push: (message: string) => {
+      push: (message: string | ProviderInputItem[]) => {
+        const normalized: ProviderInputItem[] = typeof message === 'string' ? [{ type: 'text', text: message }] : message;
         const steerServer = server;
         const threadId = activeThreadId;
         const turnId = activeTurnId;
         if (!steerServer || !threadId || !turnId) {
-          pending.push(message);
+          pending.push(normalized);
           kick();
           return;
         }
 
         steerChain = steerChain.then(async () => {
           try {
-            await steerCodexTurn(steerServer, threadId, turnId, message);
+            await steerCodexTurn(steerServer, threadId, turnId, normalized);
           } catch (err) {
             log(`Steering active turn failed; queueing follow-up: ${err instanceof Error ? err.message : String(err)}`);
-            pending.push(message);
+            pending.push(normalized);
             kick();
           }
         });
@@ -297,7 +298,7 @@ export class CodexProvider implements AgentProvider {
 async function* runOneTurn(
   server: AppServer,
   threadId: string,
-  inputText: string,
+  input: ProviderInputItem[],
   model: string,
   cwd: string,
   hasInit: () => boolean,
@@ -402,7 +403,8 @@ async function* runOneTurn(
       buffer.push({ type: 'init', continuation: threadId });
     }
 
-    const turnId = await startCodexTurn(server, { threadId, inputText, model, cwd });
+    const inputText = input.find((item) => item.type === 'text')?.text ?? '';
+    const turnId = await startCodexTurn(server, { threadId, inputText, input, model, cwd });
     setActiveTurnId(turnId);
 
     while (true) {

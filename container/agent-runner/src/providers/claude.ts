@@ -468,7 +468,7 @@ export class ClaudeProvider implements AgentProvider {
     }
 
     return {
-      push: (msg) => stream.push(msg),
+      push: (msg) => stream.push(typeof msg === 'string' ? msg : (msg.find((item) => item.type === 'text')?.text ?? '')),
       end: () => stream.end(),
       events: translateEvents(),
       abort: () => {
