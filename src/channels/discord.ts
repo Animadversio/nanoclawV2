@@ -47,7 +47,7 @@ async function registerDiscordCommands(botToken: string, applicationId?: string)
   const existing = (await rest.get(Routes.applicationCommands(applicationId))) as Array<{ id: string; name: string }>;
   const current = existing.find((cmd) => cmd.name === 'verbose');
   if (current) {
-    await rest.put(Routes.applicationCommand(applicationId, current.id), { body: verbose.toJSON() });
+    await rest.patch(Routes.applicationCommand(applicationId, current.id), { body: verbose.toJSON() });
   } else {
     await rest.post(Routes.applicationCommands(applicationId), { body: verbose.toJSON() });
   }
